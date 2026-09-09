@@ -1,3 +1,4 @@
+WTC-K82CLCED
 # Strongbox
 
 A serverless self-storage application. Users sign up, upload files to a private
