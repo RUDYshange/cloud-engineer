@@ -1,0 +1,390 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Strongbox - serverless self-storage application.
+  Cognito + API Gateway (HTTP API) + Lambda + DynamoDB + S3 + CloudFront + SNS.
+  Capstone submission - all infrastructure defined as code.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: strongbox
+    AllowedPattern: "^[a-z0-9-]{3,20}$"
+    Description: Lowercase prefix used to name every resource in the stack.
+  NotifyEmail:
+    Type: String
+    Description: Email address that receives upload notifications. AWS sends a confirmation link you must click.
+    AllowedPattern: "^[^@]+@[^@]+\\.[^@]+$"
+  StorageQuotaBytes:
+    Type: Number
+    Default: 2147483648
+    Description: Maximum total bytes a single user may store. Default 2 GiB.
+
+Globals:
+  Function:
+    Runtime: python3.12
+    Architectures:
+      - arm64
+    Timeout: 10
+    MemorySize: 256
+    CodeUri: src/
+    Environment:
+      Variables:
+        TABLE_NAME: !Ref FilesTable
+        FILES_BUCKET: !Sub "${ProjectName}-files-${AWS::AccountId}-${AWS::Region}"
+        QUOTA_BYTES: !Ref StorageQuotaBytes
+
+Resources:
+  # ------------------------------------------------------------------
+  # Identity
+  # ------------------------------------------------------------------
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: !Sub "${ProjectName}-users"
+      UsernameAttributes:
+        - email
+      AutoVerifiedAttributes:
+        - email
+      MfaConfiguration: "OFF"
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 10
+          RequireLowercase: true
+          RequireUppercase: true
+          RequireNumbers: true
+          RequireSymbols: false
+      AccountRecoverySetting:
+        RecoveryMechanisms:
+          - Name: verified_email
+            Priority: 1
+      UserAttributeUpdateSettings:
+        AttributesRequireVerificationBeforeUpdate:
+          - email
+
+  UserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      ClientName: !Sub "${ProjectName}-web"
+      UserPoolId: !Ref UserPool
+      GenerateSecret: false
+      ExplicitAuthFlows:
+        - ALLOW_USER_PASSWORD_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+      AccessTokenValidity: 1
+      IdTokenValidity: 1
+      RefreshTokenValidity: 30
+      TokenValidityUnits:
+        AccessToken: hours
+        IdToken: hours
+        RefreshToken: days
+      PreventUserExistenceErrors: ENABLED
+
+  # ------------------------------------------------------------------
+  # Data
+  # ------------------------------------------------------------------
+  FilesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${ProjectName}-files"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: userId
+          AttributeType: S
+        - AttributeName: fileId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: userId
+          KeyType: HASH
+        - AttributeName: fileId
+          KeyType: RANGE
+      SSESpecification:
+        SSEEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+
+  # Bucket is explicitly named so Lambda env vars can reference the name as a
+  # string. Using !Ref here would create a circular dependency with the
+  # S3 -> ProcessUpload event notification.
+  FilesBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete
+    Properties:
+      BucketName: !Sub "${ProjectName}-files-${AWS::AccountId}-${AWS::Region}"
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      CorsConfiguration:
+        CorsRules:
+          - AllowedMethods: [PUT, GET]
+            AllowedOrigins: ["*"]
+            AllowedHeaders: ["*"]
+            ExposedHeaders: [ETag]
+            MaxAge: 3000
+      LifecycleConfiguration:
+        Rules:
+          - Id: abort-incomplete-uploads
+            Status: Enabled
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 3
+
+  WebBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete
+    Properties:
+      BucketName: !Sub "${ProjectName}-web-${AWS::AccountId}-${AWS::Region}"
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+
+  WebBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref WebBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowCloudFrontRead
+            Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: s3:GetObject
+            Resource: !Sub "${WebBucket.Arn}/*"
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${Distribution}"
+
+  # ------------------------------------------------------------------
+  # Content delivery
+  # ------------------------------------------------------------------
+  OriginAccessControl:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub "${ProjectName}-oac"
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  Distribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        Comment: !Sub "${ProjectName} web app"
+        DefaultRootObject: index.html
+        HttpVersion: http2
+        PriceClass: PriceClass_100
+        Origins:
+          - Id: web-origin
+            DomainName: !GetAtt WebBucket.RegionalDomainName
+            OriginAccessControlId: !GetAtt OriginAccessControl.Id
+            S3OriginConfig:
+              OriginAccessIdentity: ""
+        DefaultCacheBehavior:
+          TargetOriginId: web-origin
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods: [GET, HEAD, OPTIONS]
+          CachedMethods: [GET, HEAD]
+          Compress: true
+          # AWS managed policy: CachingOptimized
+          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6
+        CustomErrorResponses:
+          - ErrorCode: 403
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+          - ErrorCode: 404
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+
+  # ------------------------------------------------------------------
+  # Messaging
+  # ------------------------------------------------------------------
+  EventsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub "${ProjectName}-events"
+      DisplayName: Strongbox
+
+  EventsSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref EventsTopic
+      Protocol: email
+      Endpoint: !Ref NotifyEmail
+
+  # ------------------------------------------------------------------
+  # API
+  # ------------------------------------------------------------------
+  Api:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      StageName: v1
+      Auth:
+        Authorizers:
+          CognitoAuth:
+            IdentitySource: $request.header.Authorization
+            JwtConfiguration:
+              issuer: !Sub "https://cognito-idp.${AWS::Region}.amazonaws.com/${UserPool}"
+              audience:
+                - !Ref UserPoolClient
+        DefaultAuthorizer: CognitoAuth
+      CorsConfiguration:
+        AllowOrigins: ["*"]
+        AllowHeaders: [Authorization, Content-Type]
+        AllowMethods: [GET, POST, DELETE, OPTIONS]
+        MaxAge: 600
+
+  # ------------------------------------------------------------------
+  # Functions
+  # ------------------------------------------------------------------
+  ListFilesFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${ProjectName}-list-files"
+      Handler: handlers.list_files
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action: dynamodb:Query
+              Resource: !GetAtt FilesTable.Arn
+      Events:
+        ListFiles:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref Api
+            Path: /files
+            Method: GET
+
+  CreateUploadUrlFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${ProjectName}-create-upload-url"
+      Handler: handlers.create_upload_url
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:PutItem
+                - dynamodb:Query
+              Resource: !GetAtt FilesTable.Arn
+            - Effect: Allow
+              Action: s3:PutObject
+              Resource: !Sub "arn:aws:s3:::${ProjectName}-files-${AWS::AccountId}-${AWS::Region}/u/*"
+      Events:
+        CreateUploadUrl:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref Api
+            Path: /files/upload-url
+            Method: POST
+
+  CreateDownloadUrlFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${ProjectName}-create-download-url"
+      Handler: handlers.create_download_url
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action: dynamodb:GetItem
+              Resource: !GetAtt FilesTable.Arn
+            - Effect: Allow
+              Action: s3:GetObject
+              Resource: !Sub "arn:aws:s3:::${ProjectName}-files-${AWS::AccountId}-${AWS::Region}/u/*"
+      Events:
+        CreateDownloadUrl:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref Api
+            Path: /files/{fileId}/download-url
+            Method: GET
+
+  DeleteFileFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${ProjectName}-delete-file"
+      Handler: handlers.delete_file
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:GetItem
+                - dynamodb:DeleteItem
+              Resource: !GetAtt FilesTable.Arn
+            - Effect: Allow
+              Action: s3:DeleteObject
+              Resource: !Sub "arn:aws:s3:::${ProjectName}-files-${AWS::AccountId}-${AWS::Region}/u/*"
+      Events:
+        DeleteFile:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref Api
+            Path: /files/{fileId}
+            Method: DELETE
+
+  # Asynchronous leg: fires on S3 upload, no user request involved.
+  ProcessUploadFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${ProjectName}-process-upload"
+      Handler: handlers.process_upload
+      Timeout: 30
+      Environment:
+        Variables:
+          TOPIC_ARN: !Ref EventsTopic
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action: dynamodb:UpdateItem
+              Resource: !GetAtt FilesTable.Arn
+            - Effect: Allow
+              Action:
+                - s3:GetObject
+                - s3:GetObjectAttributes
+              Resource: !Sub "arn:aws:s3:::${ProjectName}-files-${AWS::AccountId}-${AWS::Region}/u/*"
+            - Effect: Allow
+              Action: sns:Publish
+              Resource: !Ref EventsTopic
+      Events:
+        ObjectCreated:
+          Type: S3
+          Properties:
+            Bucket: !Ref FilesBucket
+            Events: s3:ObjectCreated:*
+            Filter:
+              S3Key:
+                Rules:
+                  - Name: prefix
+                    Value: u/
+
+Outputs:
+  ApiBaseUrl:
+    Description: Base URL for the authenticated API.
+    Value: !Sub "https://${Api}.execute-api.${AWS::Region}.amazonaws.com/v1"
+  UserPoolId:
+    Value: !Ref UserPool
+  UserPoolClientId:
+    Value: !Ref UserPoolClient
+  Region:
+    Value: !Ref AWS::Region
+  WebBucketName:
+    Description: Upload the contents of web/ here.
+    Value: !Ref WebBucket
+  DistributionId:
+    Value: !Ref Distribution
+  SiteUrl:
+    Description: Open this in a browser.
+    Value: !Sub "https://${Distribution.DomainName}"
