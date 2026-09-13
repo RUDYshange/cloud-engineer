@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Strongbox</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Newsreader:opsz,wght@6..72,400;6..72,500&family=Archivo:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<div class="shell">
+
+  <header class="masthead">
+    <div class="mark" aria-hidden="true">
+      <span class="mark-bar"></span><span class="mark-bar"></span><span class="mark-bar"></span>
+    </div>
+    <h1>Strongbox</h1>
+    <p class="tagline">Private storage. Your files, signed in and out one link at a time.</p>
+  </header>
+
+  <!-- ---------------------------------------------------------- -->
+  <section id="gate" class="gate" hidden>
+    <div class="gate-card">
+      <h2 id="gate-title">Sign in</h2>
+
+      <div class="field">
+        <label for="email">Email</label>
+        <input id="email" type="email" autocomplete="email" spellcheck="false">
+      </div>
+
+      <div class="field">
+        <label for="password">Password</label>
+        <input id="password" type="password" autocomplete="current-password">
+        <p class="hint" id="pw-hint" hidden>At least 10 characters, with an uppercase letter and a number.</p>
+      </div>
+
+      <div class="field" id="code-field" hidden>
+        <label for="code">Verification code</label>
+        <input id="code" type="text" inputmode="numeric" autocomplete="one-time-code">
+        <p class="hint">Check your inbox. The code expires in 24 hours.</p>
+      </div>
+
+      <p class="notice" id="gate-error" role="alert" hidden></p>
+
+      <button id="gate-submit" class="primary">Sign in</button>
+
+      <p class="switch">
+        <span id="switch-text">No account yet?</span>
+        <button id="switch-mode" class="linkish" type="button">Create one</button>
+      </p>
+    </div>
+  </section>
+
+  <!-- ---------------------------------------------------------- -->
+  <main id="vault" hidden>
+
+    <div class="capacity">
+      <div class="capacity-head">
+        <span class="capacity-figure" id="used-figure">—</span>
+        <span class="capacity-of">stored of <span id="quota-figure">—</span></span>
+        <button id="sign-out" class="linkish" type="button">Sign out</button>
+      </div>
+      <div class="meter" role="progressbar" aria-labelledby="used-figure" aria-valuemin="0" aria-valuemax="100" id="meter">
+        <div class="meter-fill" id="meter-fill"></div>
+      </div>
+      <p class="who" id="who"></p>
+    </div>
+
+    <div class="dropzone" id="dropzone">
+      <input type="file" id="file-input" multiple hidden>
+      <p>Drop files here, or <button class="linkish" id="browse" type="button">choose from your device</button>.</p>
+      <p class="hint">Up to 100 MB each. Uploads go straight to storage without passing through the server.</p>
+    </div>
+
+    <p class="notice" id="vault-error" role="alert" hidden></p>
+
+    <section class="manifest" aria-label="Stored files">
+      <ol id="file-list"></ol>
+      <p class="empty" id="empty" hidden>Nothing stored yet. Your first upload will appear here.</p>
+    </section>
+
+  </main>
+
+  <footer class="colophon">
+    <p>Built on Lambda, API Gateway, DynamoDB, S3, CloudFront and Cognito. Infrastructure defined in one CloudFormation template.</p>
+  </footer>
+
+</div>
+
+<script src="config.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
