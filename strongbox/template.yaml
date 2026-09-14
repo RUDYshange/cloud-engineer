@@ -120,10 +120,15 @@ Resources:
         ServerSideEncryptionConfiguration:
           - ServerSideEncryptionByDefault:
               SSEAlgorithm: AES256
+      # Pinned to the CloudFront distribution rather than "*". The browser PUTs
+      # straight to this bucket, so it needs its own CORS rules - API Gateway
+      # CORS does not cover it. No circular dependency: the distribution's only
+      # origin is WebBucket, so it never depends on this bucket.
       CorsConfiguration:
         CorsRules:
           - AllowedMethods: [PUT, GET]
-            AllowedOrigins: ["*"]
+            AllowedOrigins:
+              - !Sub "https://${Distribution.DomainName}"
             AllowedHeaders: ["*"]
             ExposedHeaders: [ETag]
             MaxAge: 3000
@@ -241,8 +246,12 @@ Resources:
               audience:
                 - !Ref UserPoolClient
         DefaultAuthorizer: CognitoAuth
+      # Pinned to the CloudFront distribution rather than "*". AllowCredentials
+      # stays off: the web app sends the Cognito JWT in the Authorization
+      # header, not in cookies.
       CorsConfiguration:
-        AllowOrigins: ["*"]
+        AllowOrigins:
+          - !Sub "https://${Distribution.DomainName}"
         AllowHeaders: [Authorization, Content-Type]
         AllowMethods: [GET, POST, DELETE, OPTIONS]
         MaxAge: 600
